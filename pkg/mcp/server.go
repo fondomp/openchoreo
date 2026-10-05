@@ -16,8 +16,8 @@ import (
 	"github.com/openchoreo/openchoreo/pkg/mcp/tools"
 )
 
-// HTTP query parameter names recognized by the MCP HTTP handler. Both are
-// optional and read once per session-creation request.
+// HTTP query parameter names recognized by the MCP HTTP handler. These are
+// optional and read on every HTTP request.
 const (
 	// QueryParamToolsets narrows the toolsets visible via tools/list to a
 	// comma-separated subset (e.g. ?toolsets=namespace,component,pe). Unknown
@@ -29,25 +29,14 @@ const (
 	// Defaults to true. The service layer enforces authz independently
 	// regardless of this flag.
 	QueryParamFilterByAuthz = "filterByAuthz"
-	// QueryParamIncludeDeprecatedTools controls whether tools/list includes the
-	// deprecated cluster-prefixed compatibility-alias tools (e.g.
-	// ?includeDeprecatedTools=true). Defaults to false as of v1.2: the aliases
-	// are hidden from tools/list but remain callable and still return a runtime
-	// deprecation warning. Clients that have not yet migrated can set this to
-	// true to keep listing the aliases — each carrying a description-level
-	// deprecation banner and a structured _meta marker — until they are removed
-	// in v1.3.
-	QueryParamIncludeDeprecatedTools = "includeDeprecatedTools"
 )
 
 // NewHTTPServer creates an MCP HTTP handler backed by a single shared server.
 //
-// All configured toolsets are registered up front. Per-session narrowing
-// happens via query parameters parsed from the initialize request:
+// All configured toolsets are registered up front. Per-request narrowing
+// happens via query parameters parsed from each HTTP request:
 //   - ?toolsets=ns1,ns2              — only show tools from those toolsets in tools/list
-//   - ?filterByAuthz=false           — disable MCP-layer authz filtering for the session
-//   - ?includeDeprecatedTools=true   — list the deprecated cluster-prefixed alias tools
-//     (hidden by default as of v1.2; they remain callable and are removed in v1.3)
+//   - ?filterByAuthz=false           — disable MCP-layer authz filtering for the request
 //
 // When pdp is non-nil the server installs a receiving middleware that filters
 // tools/list results and guards tools/call invocations based on the
@@ -99,8 +88,8 @@ func NewHTTPServer(
 
 	streamable := mcp.NewStreamableHTTPHandler(func(r *http.Request) *mcp.Server {
 		return server
-	}, nil)
-	return withSessionQueryParams(streamable), nil
+	}, &mcp.StreamableHTTPOptions{Stateless: true})
+	return withRequestQueryParams(streamable), nil
 }
 
 // NewSTDIO creates an MCP server for STDIO transport (local CLI usage).
@@ -116,18 +105,11 @@ func NewSTDIO(toolsets *tools.Toolsets) *mcp.Server {
 	return server
 }
 
-// withSessionQueryParams returns an http.Handler that extracts the optional
-// MCP session-scoping query parameters (toolsets, filterByAuthz,
-// includeDeprecatedTools) from the request URL and stores them on the request
-// context. The MCP SDK propagates
-// the initialize request's context into the long-lived session, so the values
-// set here become the per-session scope used by the tool-filter middleware.
-//
-// Subsequent requests in a stateful session do not re-read these params — the
-// session is bound to the values supplied at session creation. In stateless
-// mode the params are honored on every request because each request creates a
-// fresh session.
-func withSessionQueryParams(next http.Handler) http.Handler {
+// withRequestQueryParams reads toolsets and filterByAuthz from each HTTP
+// request and passes them to the MCP middleware through its context.
+// Stateless requests must supply their own scope; no previous request's
+// query parameters are retained.
+func withRequestQueryParams(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
 		ctx := r.Context()
@@ -141,12 +123,6 @@ func withSessionQueryParams(next http.Handler) http.Handler {
 		if raw := q.Get(QueryParamFilterByAuthz); raw != "" {
 			if v, err := strconv.ParseBool(raw); err == nil {
 				ctx = tools.WithFilterByAuthz(ctx, v)
-			}
-		}
-
-		if raw := q.Get(QueryParamIncludeDeprecatedTools); raw != "" {
-			if v, err := strconv.ParseBool(raw); err == nil {
-				ctx = tools.WithIncludeDeprecatedTools(ctx, v)
 			}
 		}
 

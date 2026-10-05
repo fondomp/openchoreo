@@ -134,7 +134,9 @@ func TestResolveBinding(t *testing.T) {
 func TestNewMiddleware_EmitsOnPanic(t *testing.T) {
 	sink := &recordingSink{}
 	emitter := testEmitter(t, sink)
-	mw := testMiddleware(t, MiddlewareOptions{Emitter: emitter, Bindings: testBindings(), Enabled: true})
+	mw := testMiddleware(t, MiddlewareOptions{
+		Emitter: emitter, Bindings: testBindings(), Config: audit.MiddlewareConfig{Enabled: true},
+	})
 
 	panicking := func(context.Context, string, mcp.Request) (mcp.Result, error) {
 		panic("handler blew up after mutating state")
@@ -180,7 +182,9 @@ func TestNewMiddleware_PassesThroughWithoutAuditing(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			sink := &recordingSink{}
 			emitter := testEmitter(t, sink)
-			mw := testMiddleware(t, MiddlewareOptions{Emitter: emitter, Bindings: testBindings(), Enabled: tt.enabled})
+			mw := testMiddleware(t, MiddlewareOptions{
+				Emitter: emitter, Bindings: testBindings(), Config: audit.MiddlewareConfig{Enabled: tt.enabled},
+			})
 
 			called := false
 			next := func(context.Context, string, mcp.Request) (mcp.Result, error) {
@@ -206,7 +210,9 @@ func TestNewMiddleware_PassesThroughWithoutAuditing(t *testing.T) {
 func TestNewMiddleware_NonCallToolMethodPassesThrough(t *testing.T) {
 	sink := &recordingSink{}
 	emitter := testEmitter(t, sink)
-	mw := testMiddleware(t, MiddlewareOptions{Emitter: emitter, Bindings: testBindings(), Enabled: true})
+	mw := testMiddleware(t, MiddlewareOptions{
+		Emitter: emitter, Bindings: testBindings(), Config: audit.MiddlewareConfig{Enabled: true},
+	})
 
 	called := false
 	next := func(context.Context, string, mcp.Request) (mcp.Result, error) {
@@ -233,7 +239,9 @@ func TestNewMiddleware_NonCallToolMethodPassesThrough(t *testing.T) {
 func TestNewMiddleware_SuccessEmitsSuccessResult(t *testing.T) {
 	sink := &recordingSink{}
 	emitter := testEmitter(t, sink)
-	mw := testMiddleware(t, MiddlewareOptions{Emitter: emitter, Bindings: testBindings(), Enabled: true})
+	mw := testMiddleware(t, MiddlewareOptions{
+		Emitter: emitter, Bindings: testBindings(), Config: audit.MiddlewareConfig{Enabled: true},
+	})
 
 	next := func(context.Context, string, mcp.Request) (mcp.Result, error) {
 		return &mcp.CallToolResult{}, nil
@@ -265,7 +273,9 @@ func TestNewMiddleware_SuccessEmitsSuccessResult(t *testing.T) {
 func TestNewMiddleware_SeedsHierarchyFromCallArguments(t *testing.T) {
 	sink := &recordingSink{}
 	emitter := testEmitter(t, sink)
-	mw := testMiddleware(t, MiddlewareOptions{Emitter: emitter, Bindings: testBindings(), Enabled: true})
+	mw := testMiddleware(t, MiddlewareOptions{
+		Emitter: emitter, Bindings: testBindings(), Config: audit.MiddlewareConfig{Enabled: true},
+	})
 
 	next := func(context.Context, string, mcp.Request) (mcp.Result, error) {
 		return &mcp.CallToolResult{}, nil
@@ -292,6 +302,38 @@ func TestNewMiddleware_SeedsHierarchyFromCallArguments(t *testing.T) {
 	}
 }
 
+// TestNewMiddleware_HandlerSetResultWins covers the escape hatch a server
+// whose only authz check lives inside the tool handler depends on: the SDK
+// folds the handler's error into CallToolResult.IsError, so classifyResult
+// would call a policy denial a failure. What the handler recorded must win.
+func TestNewMiddleware_HandlerSetResultWins(t *testing.T) {
+	sink := &recordingSink{}
+	emitter := testEmitter(t, sink)
+	mw := testMiddleware(t, MiddlewareOptions{
+		Emitter: emitter, Bindings: testBindings(), Config: audit.MiddlewareConfig{Enabled: true},
+	})
+
+	next := func(ctx context.Context, _ string, _ mcp.Request) (mcp.Result, error) {
+		audit.SetResult(ctx, audit.ResultDenied)
+		return &mcp.CallToolResult{IsError: true}, nil
+	}
+
+	req := &mcp.ServerRequest[*mcp.CallToolParamsRaw]{
+		Params: &mcp.CallToolParamsRaw{Name: "create_project", Arguments: json.RawMessage(`{"name":"proj-1"}`)},
+	}
+
+	if _, err := mw(next)(context.Background(), methodCallTool, req); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(sink.events) != 1 {
+		t.Fatalf("expected exactly one audit event, got %d", len(sink.events))
+	}
+	if sink.events[0].Result != audit.ResultDenied {
+		t.Errorf("Result = %v, want denied — the handler's SetResult must override IsError",
+			sink.events[0].Result)
+	}
+}
+
 func TestClassifyResult(t *testing.T) {
 	tests := []struct {
 		name string
@@ -305,7 +347,7 @@ func TestClassifyResult(t *testing.T) {
 			name: "no error, IsError result is failure",
 			res:  &mcp.CallToolResult{IsError: true}, err: nil, want: audit.ResultFailure,
 		},
-		{name: "ErrNoSubject is unauthenticated", res: nil, err: tools.ErrNoSubject, want: audit.ResultUnauthenticated},
+		{name: "ErrNoSubject is failure, not denied", res: nil, err: tools.ErrNoSubject, want: audit.ResultFailure},
 		{name: "ErrForbidden is denied", res: nil, err: tools.ErrForbidden, want: audit.ResultDenied},
 		{name: "ErrPDPFailure is failure, not denied", res: nil, err: tools.ErrPDPFailure, want: audit.ResultFailure},
 		{

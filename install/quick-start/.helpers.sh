@@ -586,9 +586,9 @@ install_kgateway() {
     log_success "kgateway installed"
 }
 
-# Install Thunder identity provider
+# Install ThunderID identity provider
 install_thunder() {
-    log_info "Installing Thunder ($THUNDER_VERSION)..."
+    log_info "Installing ThunderID ($THUNDER_VERSION)..."
 
     local thunder_values="$SCRIPT_DIR/../k3d/common/values-thunder.yaml"
     if [[ ! -f "$thunder_values" ]]; then
@@ -596,11 +596,11 @@ install_thunder() {
         thunder_values="/home/openchoreo/install/k3d/common/values-thunder.yaml"
     fi
 
-    install_helm_chart "thunder" "oci://ghcr.io/asgardeo/helm-charts/thunder" "$THUNDER_NS" "true" "false" "true" "600" \
+    install_helm_chart "thunder" "oci://ghcr.io/thunder-id/helm-charts/thunderid" "$THUNDER_NS" "true" "false" "true" "600" \
         "--version" "$THUNDER_VERSION" \
         "--values" "$thunder_values"
 
-    log_success "Thunder installed"
+    log_success "ThunderID installed"
 }
 
 # Apply CoreDNS custom config for *.openchoreo.localhost resolution
@@ -682,8 +682,8 @@ install_openbao() {
 
     # values-openbao.yaml runs OpenBao in dev mode and, via its postStart hook,
     # configures Kubernetes auth + reader/writer policies and seeds the platform
-    # secrets that the ExternalSecrets sync into each plane. Shared with the docs
-    # k3d install path (install/k3d/k3d-prerequisites.sh).
+    # secrets that the ExternalSecrets sync into each plane. Shared with the k3d
+    # installer (install/k3d/k3d-install.sh).
     local openbao_values="$SCRIPT_DIR/../k3d/common/values-openbao.yaml"
     if [[ ! -f "$openbao_values" ]]; then
         openbao_values="/home/openchoreo/install/k3d/common/values-openbao.yaml"
@@ -908,13 +908,22 @@ ESEOF
 # Install OpenChoreo Control Plane
 install_control_plane() {
     log_info "Installing OpenChoreo Control Plane..."
+    local audit_args=()
+    if [[ "$ENABLE_OBSERVABILITY" == "true" ]]; then
+        audit_args=(
+            "--set" "openchoreoApi.config.audit.enabled=true"
+            "--set" "openchoreoApi.config.audit.observabilityPlaneRef.kind=ClusterObservabilityPlane"
+            "--set" "openchoreoApi.config.audit.observabilityPlaneRef.name=default"
+        )
+    fi
     # Disable --wait for control plane to avoid deadlock with webhook cert hooks
     # But keep monitoring enabled to track pod status
     install_helm_chart "openchoreo-control-plane" "openchoreo-control-plane" "$CONTROL_PLANE_NS" "true" "false" "true" "1800" \
         "--values" "$SCRIPT_DIR/.values-cp.yaml" \
         "--set" "controllerManager.image.tag=$OPENCHOREO_VERSION" \
         "--set" "openchoreoApi.image.tag=$OPENCHOREO_VERSION" \
-        "--set" "backstage.image.tag=$BACKSTAGE_VERSION"
+        "--set" "backstage.image.tag=$BACKSTAGE_VERSION" \
+        ${audit_args[@]+"${audit_args[@]}"}
 
     # Wait for cluster-gateway to be ready (required for agent connections)
     log_info "Waiting for cluster-gateway to be ready..."
@@ -1094,7 +1103,8 @@ install_observability_plane() {
 
     install_helm_chart "openchoreo-observability-plane" "openchoreo-observability-plane" "$OBSERVABILITY_NS" "true" "true" "true" "1800" \
         "--values" "$SCRIPT_DIR/.values-op.yaml" \
-        "--set" "observer.image.tag=$OPENCHOREO_VERSION"
+        "--set" "observer.image.tag=$OPENCHOREO_VERSION" \
+        "--set" "observer.audit.enabled=true"
 
     # Install logs and metrics observability modules
     # See https://github.com/openchoreo/community-modules for more details
@@ -1105,7 +1115,8 @@ install_observability_plane() {
     install_helm_chart "observability-logs-opensearch" "$modules_repo/observability-logs-opensearch" "$OBSERVABILITY_NS" "true" "true" "true" "600" \
         "--version" "$LOGS_OPENSEARCH_VERSION" \
         "--set" "openSearchSetup.openSearchSecretName=opensearch-admin-credentials" \
-        "--set" "adapter.openSearchSecretName=opensearch-admin-credentials"
+        "--set" "adapter.openSearchSecretName=opensearch-admin-credentials" \
+        "--set" "auditLogs.enabled=true"
 
     install_helm_chart "observability-traces-opensearch" "$modules_repo/observability-tracing-opensearch" "$OBSERVABILITY_NS" "true" "true" "true" "600" \
         "--version" "$TRACES_OPENSEARCH_VERSION" \
@@ -1142,7 +1153,8 @@ install_observability_plane() {
     install_helm_chart "observability-logs-opensearch" "$modules_repo/observability-logs-opensearch" "$OBSERVABILITY_NS" "true" "true" "true" "600" \
         "--version" "$LOGS_OPENSEARCH_VERSION" \
         "--reuse-values" \
-        "--set" "fluent-bit.enabled=true"
+        "--set" "fluent-bit.enabled=true" \
+        "--set" "fluentBitCustomizations.clusterInstance=$CLUSTER_NAME"
 
     # Enable Kubernetes events collection
     log_info "Enabling Kubernetes events collection..."

@@ -185,6 +185,46 @@ func TestListNamespaces_APIError(t *testing.T) {
 	require.ErrorContains(t, err, "internal error")
 }
 
+// --- GetMetadata ---
+
+func TestGetMetadata_Success(t *testing.T) {
+	observerURL := "http://observer.test"
+	m := mocks.NewMockClientWithResponsesInterface(t)
+	m.EXPECT().GetMetadataWithResponse(mock.Anything).Return(&gen.GetMetadataResp{
+		HTTPResponse: httpResp(http.StatusOK),
+		JSON200: &gen.MetadataResponse{Features: gen.MetadataFeatures{
+			AuditLogs: gen.AuditLogsFeature{Enabled: true, ObserverURL: &observerURL},
+		}},
+	}, nil)
+
+	c := newMockClient(m)
+	result, err := c.GetMetadata(context.Background())
+	require.NoError(t, err)
+	assert.True(t, result.Features.AuditLogs.Enabled)
+	assert.Equal(t, observerURL, *result.Features.AuditLogs.ObserverURL)
+}
+
+func TestGetMetadata_TransportError(t *testing.T) {
+	m := mocks.NewMockClientWithResponsesInterface(t)
+	m.EXPECT().GetMetadataWithResponse(mock.Anything).Return(nil, fmt.Errorf("timeout"))
+
+	c := newMockClient(m)
+	_, err := c.GetMetadata(context.Background())
+	require.ErrorContains(t, err, "failed to get platform metadata")
+}
+
+func TestGetMetadata_APIError(t *testing.T) {
+	m := mocks.NewMockClientWithResponsesInterface(t)
+	m.EXPECT().GetMetadataWithResponse(mock.Anything).Return(&gen.GetMetadataResp{
+		HTTPResponse: httpResp(http.StatusUnauthorized),
+		Body:         []byte(`{"error":"unauthorized"}`),
+	}, nil)
+
+	c := newMockClient(m)
+	_, err := c.GetMetadata(context.Background())
+	require.ErrorContains(t, err, "unauthorized")
+}
+
 // --- GetNamespace ---
 
 func TestGetNamespace_Success(t *testing.T) {
@@ -3698,4 +3738,47 @@ func TestListComponents_WithProjectFilter(t *testing.T) {
 	result, err := c.ListComponents(context.Background(), "org-a", "proj-1", nil)
 	require.NoError(t, err)
 	require.Len(t, result.Items, 1)
+}
+
+// --- GetReleaseBindingResourceTree ---
+
+func TestGetReleaseBindingResourceTree_Success(t *testing.T) {
+	m := mocks.NewMockClientWithResponsesInterface(t)
+	m.EXPECT().GetReleaseBindingK8sResourceTreeWithResponse(mock.Anything, mock.Anything, mock.Anything).
+		Return(&gen.GetReleaseBindingK8sResourceTreeResp{
+			HTTPResponse: httpResp(http.StatusOK),
+			JSON200: &gen.K8sResourceTreeResponse{
+				RenderedReleases: []gen.ReleaseResourceTree{{Name: "rel-1", TargetPlane: "dataplane"}},
+			},
+		}, nil)
+	c := newMockClient(m)
+
+	got, err := c.GetReleaseBindingResourceTree(context.Background(), "ns", "rb")
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	require.Len(t, got.RenderedReleases, 1)
+	assert.Equal(t, "rel-1", got.RenderedReleases[0].Name)
+}
+
+func TestGetReleaseBindingResourceTree_NotFound(t *testing.T) {
+	m := mocks.NewMockClientWithResponsesInterface(t)
+	m.EXPECT().GetReleaseBindingK8sResourceTreeWithResponse(mock.Anything, mock.Anything, mock.Anything).
+		Return(&gen.GetReleaseBindingK8sResourceTreeResp{
+			HTTPResponse: httpResp(http.StatusNotFound),
+			Body:         []byte(`{"code":"NOT_FOUND","error":"release binding \"rb\" not found"}`),
+		}, nil)
+	c := newMockClient(m)
+
+	_, err := c.GetReleaseBindingResourceTree(context.Background(), "ns", "rb")
+	assert.EqualError(t, err, `release binding "rb" not found`)
+}
+
+func TestGetReleaseBindingResourceTree_TransportError(t *testing.T) {
+	m := mocks.NewMockClientWithResponsesInterface(t)
+	m.EXPECT().GetReleaseBindingK8sResourceTreeWithResponse(mock.Anything, mock.Anything, mock.Anything).
+		Return(nil, fmt.Errorf("connection refused"))
+	c := newMockClient(m)
+
+	_, err := c.GetReleaseBindingResourceTree(context.Background(), "ns", "rb")
+	assert.ErrorContains(t, err, "connection refused")
 }

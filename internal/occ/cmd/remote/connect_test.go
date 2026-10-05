@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -23,6 +24,17 @@ import (
 
 	"github.com/openchoreo/openchoreo/internal/remoteconnect"
 )
+
+// fakeRenewable stands in for the remoteUnit a reporter consults.
+type fakeRenewable struct {
+	expiry  time.Time
+	stopped bool
+	nudges  atomic.Int32
+}
+
+func (f *fakeRenewable) expiresAt() time.Time { return f.expiry }
+func (f *fakeRenewable) renewing() bool       { return !f.stopped }
+func (f *fakeRenewable) nudge()               { f.nudges.Add(1) }
 
 type fakeResolver struct {
 	resp *remoteconnect.ResolveResponse
@@ -46,7 +58,7 @@ type fakeTunnel struct {
 	fetched  []string
 }
 
-func (f *fakeTunnel) OpenStream(key string) (net.Conn, error) {
+func (f *fakeTunnel) OpenStreamWith(key, _ string) (net.Conn, error) {
 	if f.onOpen != nil {
 		f.onOpen(key)
 	}
@@ -163,8 +175,8 @@ func TestConnectEndToEnd(t *testing.T) {
 	d := New(&fakeResolver{resp: resp})
 
 	var gotKey, gotCapability, gotServerName string
-	d.dialTunnel = func(_ context.Context, agent remoteconnect.AgentEndpoint, capability string) (tunnel, error) {
-		gotCapability = capability
+	d.dialTunnel = func(_ context.Context, agent remoteconnect.AgentEndpoint, capability func() string) (tunnel, error) {
+		gotCapability = capability()
 		gotServerName = agent.ServerName
 		return &fakeTunnel{addr: echo.Addr().String(), onOpen: func(key string) { gotKey = key }}, nil
 	}
@@ -293,7 +305,7 @@ func TestConnectMultiWorkloadLocalLink(t *testing.T) {
 	comp2 := writeWorkloadFileContent(t, "comp2.yaml", providerWorkloadYAML)
 
 	d := New(erroringResolver{t: t})
-	d.dialTunnel = func(context.Context, remoteconnect.AgentEndpoint, string) (tunnel, error) {
+	d.dialTunnel = func(context.Context, remoteconnect.AgentEndpoint, func() string) (tunnel, error) {
 		t.Fatal("dialTunnel should not be called for a locally-linked dependency")
 		return nil, nil
 	}
@@ -351,11 +363,14 @@ func TestConnectMultiWorkloadLocalLinkOverride(t *testing.T) {
 }
 
 func TestBuildResolveRequestFromWorkloadFile(t *testing.T) {
-	wl, err := loadWorkloadFromFile(writeWorkloadFile(t))
+	wls, err := loadWorkloadsFromFile(writeWorkloadFile(t))
 	if err != nil {
 		t.Fatal(err)
 	}
-	req := buildResolveRequest(wl, "default", "development", nil)
+	if len(wls.workloads) != 1 {
+		t.Fatalf("got %d workloads, want 1", len(wls.workloads))
+	}
+	req := buildResolveRequest(wls.workloads[0], "default", "development", nil)
 	if req.Namespace != "default" || req.Project != "doclet" || req.Component != "doclet-document" || req.Environment != "development" {
 		t.Fatalf("unexpected identity: %+v", req)
 	}
@@ -410,7 +425,8 @@ func (s *syncBuf) String() string {
 
 // TestForwardReportsExpiredSession: once the capability expires the agent rejects every
 // new stream. Swallowing that left the app with a bare connection reset and no clue, so
-// the first failure per dependency must say what happened and how to recover.
+// the first failure per dependency must say what happened and how to recover. Reaching
+// this state at all means renewal did not land, which is what the message says.
 func TestForwardReportsExpiredSession(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -419,7 +435,12 @@ func TestForwardReportsExpiredSession(t *testing.T) {
 	t.Cleanup(func() { _ = ln.Close() })
 
 	out := &syncBuf{}
-	reporter := newStreamErrorReporter(out, mintExpiredCapability(t))
+	expired, ok := remoteconnect.CapabilityExpiry(mintExpiredCapability(t))
+	if !ok {
+		t.Fatal("expected an expiry on the minted capability")
+	}
+	unit := &fakeRenewable{expiry: expired}
+	reporter := newStreamErrorReporter(out, unit)
 	openErr := errors.New("stream rejected: not authorized")
 	reported := make(chan struct{}, 2)
 	report := func(k string, e error) { reporter.report(k, e); reported <- struct{}{} }
@@ -439,11 +460,30 @@ func TestForwardReportsExpiredSession(t *testing.T) {
 	if !strings.Contains(got, "ep/finance/ledger-svc/http") {
 		t.Errorf("output does not name the dependency: %q", got)
 	}
-	if !strings.Contains(got, "session expired") || !strings.Contains(got, "occ remote") {
+	if !strings.Contains(got, "expired") || !strings.Contains(got, "being renewed now") {
 		t.Errorf("expired session must be explained with a remedy, got: %q", got)
 	}
 	if n := strings.Count(got, "ep/finance/ledger-svc/http"); n != 1 {
 		t.Errorf("reported %d times, want once per dependency", n)
+	}
+	// Every refused connection asks for a renewal, not only the one that printed.
+	if n := unit.nudges.Load(); n != 2 {
+		t.Errorf("nudged %d times, want one per refused connection", n)
+	}
+}
+
+// Once renewal has given up the remedy is to restart rather than to wait.
+func TestReportExpiredSessionAfterRenewalStopped(t *testing.T) {
+	out := &syncBuf{}
+	reporter := newStreamErrorReporter(out, &fakeRenewable{
+		expiry:  time.Now().Add(-time.Minute),
+		stopped: true,
+	})
+	reporter.report("res/local-dev-postgres/client", errors.New("stream rejected: not authorized"))
+
+	got := out.String()
+	if !strings.Contains(got, "no longer being renewed") || !strings.Contains(got, "occ remote") {
+		t.Errorf("a stopped session must tell the developer to restart, got: %q", got)
 	}
 }
 
@@ -457,7 +497,7 @@ func TestForwardReportsNonExpiryFailure(t *testing.T) {
 	t.Cleanup(func() { _ = ln.Close() })
 
 	out := &syncBuf{}
-	reporter := newStreamErrorReporter(out, "not-a-jwt") // no expiry available
+	reporter := newStreamErrorReporter(out, &fakeRenewable{}) // no expiry available
 	reported := make(chan struct{}, 1)
 	report := func(k string, e error) { reporter.report(k, e); reported <- struct{}{} }
 	go forward(ln, "ep/doclet/backend-api/http", func() (net.Conn, error) {
@@ -475,7 +515,7 @@ func TestForwardReportsNonExpiryFailure(t *testing.T) {
 	if !strings.Contains(got, "connection refused") {
 		t.Errorf("underlying error not surfaced: %q", got)
 	}
-	if strings.Contains(got, "session expired") {
+	if strings.Contains(got, "the session expired") {
 		t.Errorf("misreported a dial failure as expiry: %q", got)
 	}
 }
@@ -669,7 +709,7 @@ func TestConnectEndToEndEndpointDependency(t *testing.T) {
 
 	d := New(&fakeResolver{resp: resp})
 	var gotKey string
-	d.dialTunnel = func(_ context.Context, _ remoteconnect.AgentEndpoint, _ string) (tunnel, error) {
+	d.dialTunnel = func(_ context.Context, _ remoteconnect.AgentEndpoint, _ func() string) (tunnel, error) {
 		return &fakeTunnel{addr: echo.Addr().String(), onOpen: func(key string) { gotKey = key }}, nil
 	}
 
@@ -705,10 +745,14 @@ func TestConnectEndToEndEndpointDependency(t *testing.T) {
 }
 
 func TestBuildResolveRequestIncludesEndpointDependencies(t *testing.T) {
-	wl, err := loadWorkloadFromFile(writeWorkloadFileContent(t, "workload.yaml", testEndpointWorkloadYAML))
+	wls, err := loadWorkloadsFromFile(writeWorkloadFileContent(t, "workload.yaml", testEndpointWorkloadYAML))
 	if err != nil {
 		t.Fatal(err)
 	}
+	if len(wls.workloads) != 1 {
+		t.Fatalf("got %d workloads, want 1", len(wls.workloads))
+	}
+	wl := wls.workloads[0]
 	req := buildResolveRequest(wl, "default", "development", wl.Spec.Dependencies.Endpoints)
 	if len(req.Endpoints) != 1 {
 		t.Fatalf("unexpected endpoints: %+v", req.Endpoints)
@@ -946,7 +990,7 @@ func TestConnectAnnouncesAttemptNotSuccessWhenDialFails(t *testing.T) {
 
 	d := New(&fakeResolver{resp: resp})
 	dialErr := errors.New("dial remote-agent 127.0.0.1:30443: EOF")
-	d.dialTunnel = func(context.Context, remoteconnect.AgentEndpoint, string) (tunnel, error) {
+	d.dialTunnel = func(context.Context, remoteconnect.AgentEndpoint, func() string) (tunnel, error) {
 		return nil, dialErr
 	}
 	d.runShell = func(context.Context, []string) error {
@@ -1000,7 +1044,7 @@ func TestConnectAnnouncesEachWorkloadOnce(t *testing.T) {
 	}
 
 	d := New(&fakeResolver{resp: resp})
-	d.dialTunnel = func(context.Context, remoteconnect.AgentEndpoint, string) (tunnel, error) {
+	d.dialTunnel = func(context.Context, remoteconnect.AgentEndpoint, func() string) (tunnel, error) {
 		return &fakeTunnel{addr: echo.Addr().String()}, nil
 	}
 	d.runShell = func(context.Context, []string) error { return nil }
@@ -1058,7 +1102,7 @@ func TestConnectFetchesRouteToNamedAgentAcrossMultipleAgents(t *testing.T) {
 		endpointAgent: {addr: echo.Addr().String()},
 		resourceAgent: {addr: echo.Addr().String(), values: map[string][]byte{"grant-token": []byte("s3cret")}},
 	}
-	d.dialTunnel = func(_ context.Context, agent remoteconnect.AgentEndpoint, _ string) (tunnel, error) {
+	d.dialTunnel = func(_ context.Context, agent remoteconnect.AgentEndpoint, _ func() string) (tunnel, error) {
 		for id, tn := range tunnels {
 			if agent.ServerName == id+".remote-connect" {
 				return tn, nil
@@ -1144,7 +1188,7 @@ func printEnvSecretCase(t *testing.T, showSecrets bool, confirm func(names []str
 	}
 
 	d := New(&fakeResolver{resp: resp})
-	d.dialTunnel = func(context.Context, remoteconnect.AgentEndpoint, string) (tunnel, error) {
+	d.dialTunnel = func(context.Context, remoteconnect.AgentEndpoint, func() string) (tunnel, error) {
 		return &fakeTunnel{values: map[string][]byte{
 			"sec/doclet-postgres/password": []byte(printEnvTestSecret),
 		}}, nil

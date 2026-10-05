@@ -13,6 +13,8 @@ import (
 // Interface defines all API client methods used by occ commands.
 // The concrete *Client type satisfies this interface.
 type Interface interface {
+	GetMetadata(ctx context.Context) (*gen.MetadataResponse, error)
+
 	ListNamespaces(ctx context.Context, params *gen.ListNamespacesParams) (*gen.NamespaceList, error)
 	GetNamespace(ctx context.Context, namespaceName string) (*gen.Namespace, error)
 	DeleteNamespace(ctx context.Context, namespaceName string) error
@@ -102,6 +104,7 @@ type Interface interface {
 
 	ListReleaseBindings(ctx context.Context, namespaceName string, params *gen.ListReleaseBindingsParams) (*gen.ReleaseBindingList, error)
 	GetReleaseBinding(ctx context.Context, namespaceName, releaseBindingName string) (*gen.ReleaseBinding, error)
+	GetReleaseBindingResourceTree(ctx context.Context, namespaceName, releaseBindingName string) (*gen.K8sResourceTreeResponse, error)
 	CreateReleaseBinding(ctx context.Context, namespaceName string, req gen.ReleaseBinding) (*gen.ReleaseBinding, error)
 	UpdateReleaseBinding(ctx context.Context, namespaceName, bindingName string, req gen.ReleaseBinding) (*gen.ReleaseBinding, error)
 	DeleteReleaseBinding(ctx context.Context, namespaceName, releaseBindingName string) error

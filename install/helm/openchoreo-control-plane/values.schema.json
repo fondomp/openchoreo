@@ -571,6 +571,21 @@
               "title": "auth",
               "type": "object"
             },
+            "deliveryInsights": {
+              "additionalProperties": false,
+              "description": "Delivery Insights (DORA metrics) portal page",
+              "properties": {
+                "enabled": {
+                  "default": false,
+                  "description": "Show the Delivery Insights page in the portal navigation. Feature preview - off by default, and separate from the Observer flag that collects the data (observer.featurePreview.deliveryInsights.enabled on the observability plane). Both are needed for the page to show anything. Maps to OPENCHOREO_FEATURES_DELIVERY_INSIGHTS_ENABLED in the Backstage container.",
+                  "title": "enabled",
+                  "type": "boolean"
+                }
+              },
+              "required": [],
+              "title": "deliveryInsights",
+              "type": "object"
+            },
             "observability": {
               "additionalProperties": false,
               "description": "Observability plane features (Metrics, Traces, Runtime Logs)",
@@ -3303,6 +3318,21 @@
               "additionalProperties": false,
               "description": "Audit logging configuration",
               "properties": {
+                "actor": {
+                  "additionalProperties": false,
+                  "description": "Audit actor settings",
+                  "properties": {
+                    "idClaim": {
+                      "default": "username",
+                      "description": "Fallback claim recorded as actor.id and matched by policies[].match.actors, used when the subject's mechanism sets no readable_id_claim or its token omits that claim. sub is recorded if this claim is missing too",
+                      "title": "idClaim",
+                      "type": "string"
+                    }
+                  },
+                  "required": [],
+                  "title": "actor",
+                  "type": "object"
+                },
                 "defaults": {
                   "additionalProperties": false,
                   "description": "Policy settings applied when no policies entry matches",
@@ -3319,10 +3349,42 @@
                   "type": "object"
                 },
                 "enabled": {
-                  "default": true,
-                  "description": "Enable audit event emission for state-modifying API requests",
+                  "default": false,
+                  "description": "Enable audit event emission for state-modifying API requests. Requires observabilityPlaneRef.",
                   "title": "enabled",
                   "type": "boolean"
+                },
+                "observabilityPlaneRef": {
+                  "additionalProperties": false,
+                  "description": "Reference to the observability plane where audit logs are stored",
+                  "properties": {
+                    "kind": {
+                      "default": "",
+                      "description": "Kind of the referenced observability plane. Required when enabled is true.",
+                      "enum": [
+                        "",
+                        "ObservabilityPlane",
+                        "ClusterObservabilityPlane"
+                      ],
+                      "required": [],
+                      "title": "kind"
+                    },
+                    "name": {
+                      "default": "",
+                      "description": "Name of the referenced observability plane. Required when enabled is true.",
+                      "title": "name",
+                      "type": "string"
+                    },
+                    "namespace": {
+                      "default": "",
+                      "description": "Namespace of the referenced ObservabilityPlane. Not used for ClusterObservabilityPlane.",
+                      "title": "namespace",
+                      "type": "string"
+                    }
+                  },
+                  "required": [],
+                  "title": "observabilityPlaneRef",
+                  "type": "object"
                 },
                 "policies": {
                   "default": [],
@@ -3413,10 +3475,35 @@
               "additionalProperties": false,
               "description": "`occ remote` remote-connect: resolve/authorize endpoints + the per-project+env remote-agent the control plane provisions into the data plane.",
               "properties": {
+                "agentAuthorizeBurst": {
+                  "default": 40,
+                  "description": "Authorize calls a remote-agent may make at once before agentAuthorizeRate\napplies, sized so a session opening a stream per dependency at start-up is not\nthrottled. Must be at least 1 whenever agentAuthorizeRate is set.\n",
+                  "minimum": 0,
+                  "title": "agentAuthorizeBurst",
+                  "type": "integer"
+                },
+                "agentAuthorizeRate": {
+                  "default": 20,
+                  "description": "Sustained authorize calls per second one remote-agent may make back to\nopenchoreo-api. Each new dependency connection costs one call, so this is what\nkeeps a local client that reconnects per request from turning into control-plane\nload. Calls over the rate wait, and are refused once the wait would exceed the\nagent's authorize timeout. 0 means unlimited.\n",
+                  "minimum": 0,
+                  "title": "agentAuthorizeRate",
+                  "type": "number"
+                },
                 "agentImage": {
                   "additionalProperties": false,
                   "description": "Container image for the provisioned remote-agent Deployment",
                   "properties": {
+                    "pullPolicy": {
+                      "default": "IfNotPresent",
+                      "description": "Image pull policy. Set Always when the tag is floating, so a rebuilt agent is fetched.",
+                      "enum": [
+                        "Always",
+                        "IfNotPresent",
+                        "Never"
+                      ],
+                      "required": [],
+                      "title": "pullPolicy"
+                    },
                     "repository": {
                       "default": "ghcr.io/openchoreo/remote-agent",
                       "description": "Remote-agent image repository",
@@ -3439,6 +3526,13 @@
                   "maximum": 65535,
                   "minimum": 1,
                   "title": "agentListenPort",
+                  "type": "integer"
+                },
+                "agentMaxSessions": {
+                  "default": 64,
+                  "description": "Concurrent `occ remote` sessions one provisioned remote-agent will serve. One\nagent is shared by every session for a project+env, so this bounds what a single\nproject can cost its data plane. Sessions beyond the cap are refused with a\nreason occ prints, rather than queued. 0 means unlimited.\n",
+                  "minimum": 0,
+                  "title": "agentMaxSessions",
                   "type": "integer"
                 },
                 "authorizeInsecure": {
@@ -3482,6 +3576,13 @@
                   "description": "JWT kid header for capability signing-key rotation.",
                   "title": "keyId",
                   "type": "string"
+                },
+                "maxSessionSeconds": {
+                  "default": 43200,
+                  "description": "Total length one `occ remote` session may reach across renewals, measured from\nits first resolve. Every renewal re-runs the full authorization check, so the\nrevocation window stays the renewal interval however long a session runs. This\nbounds a forgotten session rather than acting as an access control, and a\nrefused session can always be restarted. Must be at least ttlSeconds, or the\nfirst renewal of every session is refused. 0 means unbounded.\n",
+                  "minimum": 0,
+                  "title": "maxSessionSeconds",
+                  "type": "integer"
                 },
                 "reaperIntervalSeconds": {
                   "default": 300,
@@ -3535,6 +3636,99 @@
               },
               "required": [],
               "title": "remoteConnect",
+              "type": "object"
+            },
+            "resourceTree": {
+              "additionalProperties": false,
+              "description": "How the release resource tree walks from a root workload resource down to its children. The built-in rules live in the chart file files/resource-tree-builtin-rules.yaml and are not settable here; rules below are appended to them.",
+              "properties": {
+                "disableBuiltInRules": {
+                  "default": false,
+                  "description": "Drop the chart's built-in traversal rules from the rendered config. When true, rules below becomes the complete rule set, and leaving it empty disables child discovery entirely.",
+                  "title": "disableBuiltInRules",
+                  "type": "boolean"
+                },
+                "rules": {
+                  "default": [],
+                  "description": "Additional traversal rules, appended after the chart's built-in rules. A rule whose root duplicates a built-in root fails API server startup validation - to run a different set, set disableBuiltInRules to true and supply the complete set here.",
+                  "items": {
+                    "properties": {
+                      "children": {
+                        "description": "Child edges walked from the root. Each entry is {kind, matcher, label_selector, metadata_only, hide, children}; children nest recursively, which JSON Schema generation cannot express, so nested levels are unconstrained here and validated by the API server at startup.",
+                        "items": {
+                          "additionalProperties": true,
+                          "properties": {
+                            "kind": {
+                              "description": "The child kind this edge matches",
+                              "properties": {
+                                "group": {
+                                  "type": "string"
+                                },
+                                "kind": {
+                                  "type": "string"
+                                },
+                                "resource": {
+                                  "type": "string"
+                                },
+                                "version": {
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "version",
+                                "kind",
+                                "resource"
+                              ],
+                              "type": "object"
+                            }
+                          },
+                          "required": [
+                            "kind"
+                          ],
+                          "type": "object"
+                        },
+                        "type": "array"
+                      },
+                      "root": {
+                        "description": "Root workload kind the rule applies to",
+                        "properties": {
+                          "group": {
+                            "description": "API group, omitted or empty for the core group",
+                            "type": "string"
+                          },
+                          "kind": {
+                            "description": "Kind name",
+                            "type": "string"
+                          },
+                          "resource": {
+                            "description": "Plural REST resource name, required because it is not derivable for arbitrary CRDs",
+                            "type": "string"
+                          },
+                          "version": {
+                            "description": "API version",
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "version",
+                          "kind",
+                          "resource"
+                        ],
+                        "type": "object"
+                      }
+                    },
+                    "required": [
+                      "root",
+                      "children"
+                    ],
+                    "type": "object"
+                  },
+                  "title": "rules",
+                  "type": "array"
+                }
+              },
+              "required": [],
+              "title": "resourceTree",
               "type": "object"
             },
             "security": {
@@ -3787,7 +3981,7 @@
                         "type": "string"
                       },
                       "mechanisms": {
-                        "description": "Authentication mechanisms and entitlement extraction rules",
+                        "description": "Authentication mechanisms, each naming the claim recorded as an audit event's actor.id (readable_id_claim, preferred over audit.actor.idClaim) and the entitlement extraction rules",
                         "type": "object"
                       },
                       "priority": {
@@ -3817,7 +4011,7 @@
                                   "additionalProperties": false,
                                   "properties": {
                                     "claim": {
-                                      "default": "sub",
+                                      "default": "client_id",
                                       "title": "claim",
                                       "type": "string"
                                     },
@@ -3833,6 +4027,11 @@
                                   ],
                                   "title": "entitlement",
                                   "type": "object"
+                                },
+                                "readable_id_claim": {
+                                  "default": "client_id",
+                                  "title": "readable_id_claim",
+                                  "type": "string"
                                 }
                               },
                               "required": [
@@ -3896,6 +4095,11 @@
                                   ],
                                   "title": "entitlement",
                                   "type": "object"
+                                },
+                                "readable_id_claim": {
+                                  "default": "username",
+                                  "title": "readable_id_claim",
+                                  "type": "string"
                                 }
                               },
                               "required": [
@@ -3983,8 +4187,8 @@
                       "type": "string"
                     },
                     "write": {
-                      "default": "15s",
-                      "description": "Maximum duration before timing out writes of the response",
+                      "default": "65s",
+                      "description": "Maximum duration before timing out writes of the response. Must outlast the resource tree walk budget (60s, the top of the ladder agent 25s \u003c gateway 28s \u003c client 30s \u003c walk 60s), or a legitimate tree response is cut off while the walk is still within its budget.",
                       "title": "write",
                       "type": "string"
                     }
@@ -4605,7 +4809,7 @@
               "type": "integer"
             },
             "observerApiUrl": {
-              "default": "http://observer.openchoreo-observability-plane.svc.cluster.local:8080",
+              "default": "http://observer.openchoreo.localhost:11080",
               "title": "observerApiUrl",
               "type": "string"
             },

@@ -17,7 +17,15 @@ spec:
 
   allowedTraits:
     - kind: ClusterTrait
+      name: health-probes
+    - kind: ClusterTrait
+      name: horizontal-pod-autoscaler
+    - kind: ClusterTrait
       name: observability-alert-rule
+    - kind: ClusterTrait
+      name: persistent-volume-claim
+    - kind: ClusterTrait
+      name: vertical-pod-autoscaler
 
   validations:
     - rule: "${workload.endpoints.exists(name, endpoint, endpoint.type == 'HTTP')}"
@@ -85,6 +93,7 @@ spec:
                     ${has(workload.container.command) ? workload.container.command : oc_omit()}
                   args: |
                     ${has(workload.container.args) ? workload.container.args : oc_omit()}
+                  ports: ${workload.toContainerPorts()}
                   resources:
                     requests:
                       cpu: ${environmentConfigs.resources.requests.cpu}

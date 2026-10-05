@@ -577,7 +577,7 @@ collect_images() {
         log_info "Collecting observability module images..." >&2
         local modules_repo="oci://ghcr.io/openchoreo/helm-charts"
         local module_charts=(
-            "${modules_repo}/observability-logs-opensearch --version ${LOGS_OPENSEARCH_VERSION} --set openSearchSetup.openSearchSecretName=opensearch-admin-credentials --set adapter.openSearchSecretName=opensearch-admin-credentials --set fluent-bit.enabled=true|observability-logs-opensearch"
+            "${modules_repo}/observability-logs-opensearch --version ${LOGS_OPENSEARCH_VERSION} --set openSearchSetup.openSearchSecretName=opensearch-admin-credentials --set adapter.openSearchSecretName=opensearch-admin-credentials --set fluent-bit.enabled=true --set fluentBitCustomizations.clusterInstance=${CLUSTER_NAME}|observability-logs-opensearch"
             "${modules_repo}/observability-tracing-opensearch --version ${TRACES_OPENSEARCH_VERSION} --set openSearch.enabled=false --set openSearchSetup.openSearchSecretName=opensearch-admin-credentials|observability-traces-opensearch"
             "${modules_repo}/observability-metrics-prometheus --version ${METRICS_PROMETHEUS_VERSION}|observability-metrics-prometheus"
             "${modules_repo}/observability-events-otel-collector --version ${EVENTS_OTEL_COLLECTOR_VERSION}|observability-events-kubernetes"
@@ -607,7 +607,7 @@ collect_images() {
             "oci://ghcr.io/external-secrets/charts/external-secrets --version ${ESO_VERSION} --set installCRDs=true|external-secrets|"
             "oci://cr.kgateway.dev/kgateway-dev/charts/kgateway --version ${KGATEWAY_VERSION}|kgateway|"
             "oci://ghcr.io/openbao/charts/openbao --version ${OPENBAO_VERSION}|openbao|${OPENBAO_VALUES}"
-            "oci://ghcr.io/asgardeo/helm-charts/thunder --version ${THUNDER_VERSION}|thunder|${THUNDER_VALUES}"
+            "oci://ghcr.io/thunder-id/helm-charts/thunderid --version ${THUNDER_VERSION}|thunder|${THUNDER_VALUES}"
         )
 
         local prereq_images=()

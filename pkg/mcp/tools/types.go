@@ -29,13 +29,9 @@ const (
 // the client requested via the ?toolsets= query param.
 type requestedToolsetsCtxKey struct{}
 
-// filterByAuthzCtxKey is the context key used to carry the per-session
+// filterByAuthzCtxKey is the context key used to carry the per-request
 // filterByAuthz flag from the ?filterByAuthz= query param.
 type filterByAuthzCtxKey struct{}
-
-// includeDeprecatedToolsCtxKey is the context key used to carry the per-session
-// includeDeprecatedTools flag from the ?includeDeprecatedTools= query param.
-type includeDeprecatedToolsCtxKey struct{}
 
 // WithRequestedToolsets returns a copy of ctx that carries the set of toolsets
 // the client requested. Empty or nil set means "no narrowing" — the middleware
@@ -48,49 +44,26 @@ func WithRequestedToolsets(ctx context.Context, requested map[ToolsetType]bool) 
 }
 
 // RequestedToolsetsFromContext returns the set of toolsets the client requested
-// for this session, if any. The second return value reports whether the client
+// for this request, if any. The second return value reports whether the client
 // supplied any narrowing.
 func RequestedToolsetsFromContext(ctx context.Context) (map[ToolsetType]bool, bool) {
 	v, ok := ctx.Value(requestedToolsetsCtxKey{}).(map[ToolsetType]bool)
 	return v, ok && len(v) > 0
 }
 
-// WithFilterByAuthz returns a copy of ctx carrying the per-session decision of
+// WithFilterByAuthz returns a copy of ctx carrying the per-request decision of
 // whether to apply MCP-layer authz filtering. The default (no value in ctx) is
 // true.
 func WithFilterByAuthz(ctx context.Context, filter bool) context.Context {
 	return context.WithValue(ctx, filterByAuthzCtxKey{}, filter)
 }
 
-// FilterByAuthzFromContext returns the per-session filterByAuthz flag if the
+// FilterByAuthzFromContext returns the per-request filterByAuthz flag if the
 // client explicitly supplied one. The second return value reports whether a
 // value was set; callers should default to true when not set.
 func FilterByAuthzFromContext(ctx context.Context) (bool, bool) {
 	v, ok := ctx.Value(filterByAuthzCtxKey{}).(bool)
 	return v, ok
-}
-
-// WithIncludeDeprecatedTools returns a copy of ctx carrying the per-session
-// decision of whether tools/list should include deprecated compatibility-alias
-// tools. The default (no value in ctx) is false as of v1.2: deprecated aliases
-// are hidden from tools/list, though they remain callable and still return a
-// runtime deprecation warning. Clients that have not yet migrated can set this
-// to true to keep listing the aliases (each carrying a description-level
-// deprecation banner and a structured _meta marker) until they are removed in
-// v1.3.
-func WithIncludeDeprecatedTools(ctx context.Context, include bool) context.Context {
-	return context.WithValue(ctx, includeDeprecatedToolsCtxKey{}, include)
-}
-
-// IncludeDeprecatedToolsFromContext reports whether tools/list should include
-// the deprecated compatibility-alias tools for this session. Defaults to false
-// when the client did not set the flag.
-func IncludeDeprecatedToolsFromContext(ctx context.Context) bool {
-	v, ok := ctx.Value(includeDeprecatedToolsCtxKey{}).(bool)
-	if !ok {
-		return false
-	}
-	return v
 }
 
 // DefaultPageSize is the default number of items per page for MCP list operations.

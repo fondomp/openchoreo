@@ -93,6 +93,18 @@ func (c *Client) GetClient() *gen.ClientWithResponses {
 	return c.client.(*gen.ClientWithResponses)
 }
 
+// GetMetadata retrieves how the platform is configured, such as where audit logs are served
+func (c *Client) GetMetadata(ctx context.Context) (*gen.MetadataResponse, error) {
+	resp, err := c.client.GetMetadataWithResponse(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get platform metadata: %w", err)
+	}
+	if resp.JSON200 == nil {
+		return nil, apiError(resp.StatusCode(), resp.Body)
+	}
+	return resp.JSON200, nil
+}
+
 // ListNamespaces retrieves all namespaces
 func (c *Client) ListNamespaces(ctx context.Context, params *gen.ListNamespacesParams) (*gen.NamespaceList, error) {
 	resp, err := c.client.ListNamespacesWithResponse(ctx, params)
@@ -991,6 +1003,19 @@ func (c *Client) GetReleaseBinding(ctx context.Context, namespaceName, releaseBi
 	}
 	if resp.StatusCode() == http.StatusNotFound {
 		return nil, nil
+	}
+	if resp.JSON200 == nil {
+		return nil, apiError(resp.StatusCode(), resp.Body)
+	}
+	return resp.JSON200, nil
+}
+
+// GetReleaseBindingResourceTree retrieves the Kubernetes resource tree for a
+// release binding's rendered releases, including discovered child resources.
+func (c *Client) GetReleaseBindingResourceTree(ctx context.Context, namespaceName, releaseBindingName string) (*gen.K8sResourceTreeResponse, error) {
+	resp, err := c.client.GetReleaseBindingK8sResourceTreeWithResponse(ctx, namespaceName, releaseBindingName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get resource tree: %w", err)
 	}
 	if resp.JSON200 == nil {
 		return nil, apiError(resp.StatusCode(), resp.Body)

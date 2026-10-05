@@ -1327,6 +1327,43 @@
       "title": "kubernetesClusterDomain",
       "type": "string"
     },
+    "networkPolicy": {
+      "additionalProperties": false,
+      "description": "Namespace ingress isolation for observability-plane workloads. Requires a NetworkPolicy-capable CNI.",
+      "properties": {
+        "additionalIngress": {
+          "default": [],
+          "description": "Additional ingress rules appended to the built-in rules",
+          "items": {
+            "required": [],
+            "type": "object"
+          },
+          "title": "additionalIngress",
+          "type": "array"
+        },
+        "enabled": {
+          "default": true,
+          "description": "Restrict ingress to the release namespace, except for explicitly exempted applications and rules",
+          "title": "enabled",
+          "type": "boolean"
+        },
+        "unrestrictedIngressAppNames": {
+          "default": [
+            "gateway-default",
+            "opentelemetry-collector"
+          ],
+          "description": "app.kubernetes.io/name values allowed unrestricted ingress",
+          "items": {
+            "type": "string"
+          },
+          "title": "unrestrictedIngressAppNames",
+          "type": "array"
+        }
+      },
+      "required": [],
+      "title": "networkPolicy",
+      "type": "object"
+    },
     "observer": {
       "additionalProperties": true,
       "description": "OpenChoreo Observer service configuration - REST API that abstracts observability backends for logging, metrics, and tracing via adapters",
@@ -1365,6 +1402,21 @@
           "additionalProperties": false,
           "description": "Audit logging configuration",
           "properties": {
+            "actor": {
+              "additionalProperties": false,
+              "description": "Audit actor settings",
+              "properties": {
+                "idClaim": {
+                  "default": "username",
+                  "description": "Fallback claim recorded as actor.id and matched by policies[].match.actors, used when the subject's mechanism sets no readable_id_claim or its token omits that claim. sub is recorded if this claim is missing too",
+                  "title": "idClaim",
+                  "type": "string"
+                }
+              },
+              "required": [],
+              "title": "actor",
+              "type": "object"
+            },
             "defaults": {
               "additionalProperties": false,
               "description": "Policy settings applied when no policies entry matches",
@@ -1381,13 +1433,24 @@
               "type": "object"
             },
             "enabled": {
-              "default": true,
+              "default": false,
               "description": "Enable audit event emission for state-modifying observer API requests",
               "title": "enabled",
               "type": "boolean"
             },
             "policies": {
-              "default": [],
+              "default": [
+                {
+                  "match": {
+                    "operations": [
+                      "QueryAuditLogs"
+                    ]
+                  },
+                  "set": {
+                    "publish": false
+                  }
+                }
+              ],
               "description": "Ordered, first-match-wins policy overrides. Each entry has a `match` selector and a `set` block of overrides. See the audit logging docs for the selector-admissibility rules enforced at startup.\n",
               "items": {
                 "additionalProperties": true,
@@ -1431,27 +1494,6 @@
           "title": "cors",
           "type": "object"
         },
-        "deliveryInsights": {
-          "additionalProperties": false,
-          "description": "Delivery Insights (DORA metrics).",
-          "properties": {
-            "aggregationEnabled": {
-              "default": false,
-              "description": "Run the DORA aggregator in the Observer process. It is a background loop that periodically reads delivery lifecycle events (DeploymentStarted/Succeeded/Failed/Recovered, emitted per rollout by the releasebinding controller) from the logging backend, folds them into durable SQL facts, and pre-computes the daily, weekly and monthly rollups the Delivery Insights API serves; observability-plane incidents are folded in the same pass to derive Change Failure Rate and Mean Time to Recovery. It governs aggregation only - the read API is served by every replica either way, though with no aggregator running there are no facts for it to return. The aggregator has no leader election, so exactly one replica may run it and the chart refuses replicas \u003e 1 while it is enabled; a multi-replica Observer therefore cannot collect Delivery Insights data until leader election is added.",
-              "title": "aggregationEnabled",
-              "type": "boolean"
-            },
-            "eventsSourceEnabled": {
-              "default": false,
-              "description": "Feed the aggregator delivery lifecycle events from the logs adapter. Requires an adapter implementing the events reasons filter and searchAfter pagination; without it Deployment Frequency, Lead Time and Change Failure Rate have no data.",
-              "title": "eventsSourceEnabled",
-              "type": "boolean"
-            }
-          },
-          "required": [],
-          "title": "deliveryInsights",
-          "type": "object"
-        },
         "extraEnvs": {
           "description": "Extra environment variables for the Observer container",
           "items": {
@@ -1470,6 +1512,30 @@
           },
           "title": "extraEnvs",
           "type": "array"
+        },
+        "featurePreview": {
+          "additionalProperties": false,
+          "description": "Features available for evaluation and not recommended for production use. They are off by default, may change or be removed, and are not covered by upgrade guarantees.",
+          "properties": {
+            "deliveryInsights": {
+              "additionalProperties": false,
+              "description": "Delivery Insights (DORA metrics) collection in the Observer.",
+              "properties": {
+                "enabled": {
+                  "default": false,
+                  "description": "Feature preview, not recommended for production. Collect DORA delivery metrics in the Observer. Requires a logs adapter that can filter events by reason across all namespaces; without one only Mean Time to Recovery is derived. Safe with multiple replicas, but more than one replica needs alertStoreBackend postgresql. Maps to FEATURE_PREVIEW_DELIVERY_INSIGHTS_ENABLED in the Observer container.",
+                  "title": "enabled",
+                  "type": "boolean"
+                }
+              },
+              "required": [],
+              "title": "deliveryInsights",
+              "type": "object"
+            }
+          },
+          "required": [],
+          "title": "featurePreview",
+          "type": "object"
         },
         "finOpsAdapter": {
           "additionalProperties": false,
@@ -1708,6 +1774,10 @@
                           "required": [],
                           "type": "object"
                         },
+                        "readable_id_claim": {
+                          "description": "JWT claim carrying a human-readable identity, recorded as an audit event's actor.id. Falls back to audit.actor.idClaim, then sub, when unset or absent from the token",
+                          "type": "string"
+                        },
                         "type": {
                           "description": "Authentication mechanism type (oauth2, etc.)",
                           "type": "string"
@@ -1812,9 +1882,7 @@
           "type": "object"
         }
       },
-      "required": [
-        "deliveryInsights"
-      ],
+      "required": [],
       "title": "observer",
       "type": "object"
     },

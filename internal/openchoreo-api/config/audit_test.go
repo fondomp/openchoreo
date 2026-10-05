@@ -17,6 +17,9 @@ func TestAuditConfig_ValidPoliciesRoundTrip(t *testing.T) {
 	cfg := loadAuditTestConfig(t, `
 audit:
   enabled: true
+  observability_plane_ref:
+    kind: ClusterObservabilityPlane
+    name: default
   defaults:
     publish: true
   policies:
@@ -54,6 +57,9 @@ func TestAuditConfig_ExecAndWirelogsAreSelectable(t *testing.T) {
 	cfg := loadAuditTestConfig(t, `
 audit:
   enabled: true
+  observability_plane_ref:
+    kind: ClusterObservabilityPlane
+    name: default
   defaults:
     publish: true
   policies:
@@ -71,6 +77,26 @@ audit:
 
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("Validate() error = %v, want none — Exec/Wirelogs must be valid operations/actions", err)
+	}
+}
+
+func TestAuditConfig_ActorIDClaim(t *testing.T) {
+	tests := []struct {
+		name string
+		yaml string
+		want string
+	}{
+		{name: "defaults to sub", yaml: "audit:\n  enabled: false\n", want: "sub"},
+		{name: "decodes a configured claim", yaml: "audit:\n  actor:\n    id_claim: email\n", want: "email"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := loadAuditTestConfig(t, tt.yaml)
+			if got := cfg.Audit.Actor.IDClaim; got != tt.want {
+				t.Errorf("Audit.Actor.IDClaim = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 
@@ -159,19 +185,19 @@ audit:
 	}
 }
 
-func TestAuditConfig_RejectsInvalidOriginValue(t *testing.T) {
+func TestAuditConfig_RejectsInvalidSurfaceValue(t *testing.T) {
 	cfg := loadAuditTestConfig(t, `
 audit:
   policies:
     - match:
-        origins: [bogus]
+        surfaces: [bogus]
       set:
         publish: false
 `)
 
 	err := cfg.Validate()
 	if err == nil {
-		t.Fatal("Validate() = nil, want an error for an unrecognized origin value")
+		t.Fatal("Validate() = nil, want an error for an unrecognized surface value")
 	}
 	if !strings.Contains(err.Error(), "must be one of") {
 		t.Errorf("Validate() error = %q, want it to mention the allowed values", err.Error())

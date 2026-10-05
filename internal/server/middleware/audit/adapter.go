@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/openchoreo/openchoreo/internal/server/middleware/auth"
+	"github.com/openchoreo/openchoreo/internal/server/middleware/auth/jwt"
 )
 
 // This file holds the helpers every surface adapter (REST's Middleware,
@@ -21,10 +22,13 @@ import (
 // just a neutral header-value type — so an MCP-SDK-coupled package can depend
 // on this file without pulling in anything REST-specific.
 
+// DefaultActorIDClaim is the token claim recorded as actor.id by default.
+const DefaultActorIDClaim = "sub"
+
 // ExtractActor derives the audit Actor from the authenticated subject stored
 // in ctx by the auth middleware. Shared by every surface adapter so
 // actor-identity logic exists in exactly one place.
-func ExtractActor(ctx context.Context) Actor {
+func ExtractActor(ctx context.Context, idClaim string) Actor {
 	subjectCtx, ok := auth.GetSubjectContextFromContext(ctx)
 	if !ok || subjectCtx == nil {
 		return Actor{
@@ -38,17 +42,13 @@ func ExtractActor(ctx context.Context) Actor {
 		actorType = "user"
 	}
 
-	// Identity is the token's validated sub claim. An absent sub falls back
-	// to "unknown" rather than being recorded as a real identity. The "<nil>"
-	// check is defense-in-depth: jwt/resolver.go (the only production
-	// constructor of SubjectContext today) already reads sub explicitly
-	// rather than through fmt.Sprintf, so it never produces the literal
-	// string "<nil>" — but a fabricated actor identity in an audit trail is
-	// undetectable downstream, so this stays belt-and-braces against some
-	// other future constructor reintroducing that failure mode.
+	// "unknown" is reached only when even sub is absent. The "<nil>" check is
+	// defense-in-depth: a fabricated actor identity in an audit trail is
+	// undetectable downstream, so this guards against a future SubjectContext
+	// constructor formatting a missing claim with fmt.Sprintf.
 	actorID := "unknown"
-	if subjectCtx.ID != "" && subjectCtx.ID != "<nil>" {
-		actorID = subjectCtx.ID
+	if id := actorIDFromContext(ctx, subjectCtx, idClaim); id != "" && id != "<nil>" {
+		actorID = id
 	}
 
 	// SessionID is empty whenever the IdP issues no sid claim, which OIDC
@@ -65,6 +65,32 @@ func ExtractActor(ctx context.Context) Actor {
 		actor.Entitlements = map[string][]string{subjectCtx.EntitlementClaim: subjectCtx.EntitlementValues}
 	}
 	return actor
+}
+
+// The per-mechanism claim comes first because one global claim cannot identify
+// every actor type: a claim naming a person is absent from the machine tokens a
+// service account presents.
+//
+// The cost of falling through is that actor.id can be drawn from different
+// claims on different records, with nothing in the envelope recording which, so
+// policies[].match.actors selectors and --actor filters are reliable within an
+// actor type but not necessarily across types.
+//
+// The JWT middleware is the only production writer of SubjectContext and
+// stores the validated claims on the same ctx first, so wherever a subject is
+// present its claims are too.
+func actorIDFromContext(ctx context.Context, subjectCtx *auth.SubjectContext, idClaim string) string {
+	if subjectCtx.ReadableID != "" {
+		return subjectCtx.ReadableID
+	}
+	if idClaim != "" && idClaim != DefaultActorIDClaim {
+		if claims, ok := jwt.GetClaimsFromContext(ctx); ok {
+			if id, _ := claims[idClaim].(string); id != "" {
+				return id
+			}
+		}
+	}
+	return subjectCtx.ID
 }
 
 // newUUID returns a UUID v7, falling back to v4 if v7 generation fails.
@@ -117,12 +143,10 @@ func RequestIDRejections() int64 {
 // request with an oversized or arbitrary string. Requiring a valid UUID
 // bounds it to a fixed shape.
 //
-// On REST and MCP, logger.Middleware already runs this same validation
-// against the inbound header and normalizes it before this ever executes, so
-// here it's a no-op in the common case — this stays so the audit envelope is
-// still well-formed if that ever changes. exec and wirelogs have no logger
-// middleware in front of them (see NewExecWirelogsAuditMiddleware), so this
-// is their only validation and normalization point.
+// On REST, MCP, exec and wirelogs, logger.Middleware already runs this same
+// validation against the inbound header and normalizes it before this ever
+// executes, so here it's a no-op in the common case — this stays so the audit
+// envelope is still well-formed if that ever changes.
 func RequestIDFromHeader(h http.Header) string {
 	requestID := h.Get("X-Request-ID")
 	if requestID != "" {
@@ -174,7 +198,7 @@ func SourceIPFromHeader(h http.Header) string {
 // Envelope differently. sourceIPFallback applies only when the header carries
 // no IP hint — REST passes r.RemoteAddr, MCP passes "".
 func EmitFromContext(
-	ctx context.Context, emitter *Emitter, op *Operation, origin Origin, result Result,
+	ctx context.Context, emitter *Emitter, actorIDClaim string, op *Operation, surface Surface, result Result,
 	auditData *AuditData, header http.Header, sourceIPFallback string,
 ) {
 	sourceIP := SourceIPFromHeader(header)
@@ -182,14 +206,15 @@ func EmitFromContext(
 		sourceIP = sourceIPFallback
 	}
 	env := Envelope{
-		Origin:    origin,
-		Actor:     ExtractActor(ctx),
+		Surface:   surface,
+		Actor:     ExtractActor(ctx, actorIDClaim),
 		Result:    result,
 		Resource:  auditData.Resource,
 		Hierarchy: auditData.Hierarchy,
 		Request:   auditData.Request,
 		RequestID: RequestIDFromHeader(header),
 		SourceIP:  sourceIP,
+		UserAgent: header.Get("User-Agent"),
 		Metadata:  auditData.Metadata,
 	}
 	emitter.Emit(ctx, op, env)

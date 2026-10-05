@@ -497,6 +497,15 @@ type AgentConnectionStatus struct {
 	Message *string `json:"message,omitempty"`
 }
 
+// AuditLogsFeature Audit trail read path
+type AuditLogsFeature struct {
+	// Enabled Whether audit logging is enabled
+	Enabled bool `json:"enabled"`
+
+	// ObserverURL Base URL of the observer that serves audit logs. Omitted when audit logging is disabled or the referenced observability plane is not found.
+	ObserverURL *string `json:"observerURL,omitempty"`
+}
+
 // AuthMechanismConfig Configuration for an authentication mechanism
 type AuthMechanismConfig struct {
 	// Entitlement Configuration for extracting entitlement claims from tokens
@@ -676,6 +685,24 @@ type CapabilityResource struct {
 
 	// Path Full resource path
 	Path *string `json:"path,omitempty"`
+}
+
+// ChildDiscoveryStatus Reports that children of one kind could not be discovered under a node. It is attached to the nearest node the client can see, so a failure while expanding a hidden intermediate resource still surfaces somewhere. Its presence means the node's children of that kind are incomplete, not that there are none.
+type ChildDiscoveryStatus struct {
+	// Group API group of the child kind that could not be discovered (empty for core)
+	Group *string `json:"group,omitempty"`
+
+	// Kind Kind of the child resources that could not be discovered
+	Kind string `json:"kind"`
+
+	// Message Optional human-readable detail about the failure
+	Message *string `json:"message,omitempty"`
+
+	// State Why discovery of this child kind did not complete. Currently `forbidden`, meaning the platform is not permitted to list that kind, or `error`, which covers every other failure including a truncated result. Left open rather than enumerated so a new state does not break existing clients; treat an unrecognized value as `error`.
+	State string `json:"state"`
+
+	// Version API version of the child kind that could not be discovered
+	Version string `json:"version"`
 }
 
 // ClusterAgentConfig Configuration for cluster agent-based communication
@@ -2266,6 +2293,18 @@ type MessageResponse struct {
 	Message string `json:"message"`
 }
 
+// MetadataFeatures Optional platform features and how clients reach them
+type MetadataFeatures struct {
+	// AuditLogs Audit trail read path
+	AuditLogs AuditLogsFeature `json:"auditLogs"`
+}
+
+// MetadataResponse How this OpenChoreo installation is configured
+type MetadataResponse struct {
+	// Features Optional platform features and how clients reach them
+	Features MetadataFeatures `json:"features"`
+}
+
 // Namespace Namespace resource.
 // Control plane namespaces hold resources like Projects, Components, and Environments.
 // These namespaces are identified by the label `openchoreo.dev/control-plane=true`.
@@ -3389,6 +3428,9 @@ type ResourceInstanceStatus struct {
 
 // ResourceNode A single resource in the resource tree
 type ResourceNode struct {
+	// ChildrenStatus Per-kind child-discovery failures under this node. Present only when at least one kind of child could not be discovered; absent means discovery completed for every kind configured under this node.
+	ChildrenStatus *[]ChildDiscoveryStatus `json:"childrenStatus,omitempty"`
+
 	// CreatedAt Creation timestamp of the resource
 	CreatedAt *time.Time `json:"createdAt,omitempty"`
 
@@ -3401,13 +3443,19 @@ type ResourceNode struct {
 	// Kind Kind of the resource
 	Kind string `json:"kind"`
 
+	// MatchedBy How this node was attributed to its parent, when the attribution was not exact. Set to `labelSelector` when the node was matched heuristically by labels, which can over-match; absent for exact ownerRef matches. Consoles should badge nodes that carry it.
+	MatchedBy *string `json:"matchedBy,omitempty"`
+
+	// MetadataOnly True when `object` has been projected down to `apiVersion`, `kind` and `metadata` and therefore carries no spec, status or data. Absent means the metadata-only projection was not applied; resource-specific sanitization can still remove fields. A Secret's `data` and `stringData` are removed that way, unconditionally, whether or not the projection applied.
+	MetadataOnly *bool `json:"metadataOnly,omitempty"`
+
 	// Name Name of the resource
 	Name string `json:"name"`
 
 	// Namespace Namespace of the resource
 	Namespace *string `json:"namespace,omitempty"`
 
-	// Object Full Kubernetes resource object
+	// Object The Kubernetes resource object. Reduced to `apiVersion`, `kind` and `metadata` when `metadataOnly` is true.
 	Object map[string]interface{} `json:"object"`
 
 	// ParentRefs References to parent resources
@@ -4275,6 +4323,27 @@ type WorkflowRunEventEntry struct {
 	Type string `json:"type"`
 }
 
+// WorkflowRunInputArtifact Metadata and trusted reference for an immutable workflow input. The object never includes bytes, credentials, tokens, signed URLs, or secrets.
+type WorkflowRunInputArtifact struct {
+	ExpiresAt time.Time `json:"expiresAt"`
+	MediaType string    `json:"mediaType"`
+	Name      string    `json:"name"`
+	Sha256    string    `json:"sha256"`
+	SizeBytes int64     `json:"sizeBytes"`
+
+	// Uri Content-addressed reference in the trusted immutable artifact store.
+	Uri string `json:"uri"`
+}
+
+// WorkflowRunInputArtifactStatus Non-sensitive metadata for an accepted immutable input. URI and payload are intentionally absent.
+type WorkflowRunInputArtifactStatus struct {
+	ExpiresAt time.Time `json:"expiresAt"`
+	MediaType string    `json:"mediaType"`
+	Name      string    `json:"name"`
+	Sha256    string    `json:"sha256"`
+	SizeBytes int64     `json:"sizeBytes"`
+}
+
 // WorkflowRunList Paginated list of workflow runs
 type WorkflowRunList struct {
 	Items []WorkflowRun `json:"items"`
@@ -4295,6 +4364,9 @@ type WorkflowRunLogEntry struct {
 
 // WorkflowRunSpec Desired state of a WorkflowRun
 type WorkflowRunSpec struct {
+	// InputArtifacts Immutable content-addressed inputs delivered to the runner as read-only files. Never use parameters to transport their contents.
+	InputArtifacts *[]WorkflowRunInputArtifact `json:"inputArtifacts,omitempty"`
+
 	// TtlAfterCompletion Time-to-live for this workflow run after completion (duration string like 10d1h30m).
 	TtlAfterCompletion *string `json:"ttlAfterCompletion,omitempty"`
 
@@ -4307,8 +4379,11 @@ type WorkflowRunStatus struct {
 	CompletedAt *time.Time `json:"completedAt,omitempty"`
 
 	// Conditions Kubernetes-style conditions
-	Conditions *[]Condition         `json:"conditions,omitempty"`
-	Resources  *[]ResourceReference `json:"resources,omitempty"`
+	Conditions *[]Condition `json:"conditions,omitempty"`
+
+	// InputArtifacts Non-sensitive accepted input metadata. It never contains URI or content.
+	InputArtifacts *[]WorkflowRunInputArtifactStatus `json:"inputArtifacts,omitempty"`
+	Resources      *[]ResourceReference              `json:"resources,omitempty"`
 
 	// RunReference Reference to a Kubernetes resource applied during a workflow run
 	RunReference *ResourceReference `json:"runReference,omitempty"`

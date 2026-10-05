@@ -5,6 +5,7 @@ package remote
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"time"
@@ -24,13 +25,13 @@ const remoteAgentEndpointOverrideEnv = "OCC_REMOTE_AGENT_ENDPOINT"
 // cloud LoadBalancer being assigned, or a local port-forward being established).
 const dialRetryTimeout = 30 * time.Second
 
-// dialRemoteAgentTunnel opens a single yamux tunnel to one remote-agent, presenting the
-// capability in the Hello handshake. One TunnelClient is opened per remote-agent (a
-// workload's dependencies fan out to one agent per provider namespace) and shared across
-// that agent's targets; each accepted local connection becomes one yamux stream (see
-// connect.go). The agent's SNI + pinned cert come from the resolve response, so
-// overriding the dial address stays safe.
-func dialRemoteAgentTunnel(ctx context.Context, agent remoteconnect.AgentEndpoint, capability string) (*remoteconnect.TunnelClient, error) {
+// dialRemoteAgentTunnel opens a single yamux tunnel to one remote-agent. One TunnelClient
+// is opened per remote-agent (a workload's dependencies fan out to one agent per provider
+// namespace) and shared across that agent's targets; each accepted local connection
+// becomes one yamux stream (see connect.go). The agent's SNI + pinned cert come from the
+// resolve response, so overriding the dial address stays safe. capability is read once
+// per stream, so renewing the session takes effect without re-dialing.
+func dialRemoteAgentTunnel(ctx context.Context, agent remoteconnect.AgentEndpoint, capability func() string) (*remoteconnect.TunnelClient, error) {
 	endpoint := agent.Endpoint
 	if override := os.Getenv(remoteAgentEndpointOverrideEnv); override != "" {
 		endpoint = override
@@ -47,7 +48,8 @@ func dialRemoteAgentTunnel(ctx context.Context, agent remoteconnect.AgentEndpoin
 			return client, nil
 		}
 		lastErr = err
-		if time.Now().After(deadline) {
+		var rejected *remoteconnect.HandshakeRejectedError
+		if errors.As(err, &rejected) || time.Now().After(deadline) {
 			return nil, fmt.Errorf("connect to remote-agent %s (%s): %w", endpoint, agent.ServerName, lastErr)
 		}
 		select {

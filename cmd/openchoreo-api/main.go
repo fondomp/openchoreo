@@ -80,7 +80,7 @@ func main() {
 		bootLogger.Error("Failed to unmarshal configuration", "error", err)
 		os.Exit(1)
 	}
-	if err := cfg.Validate(); err != nil {
+	if err := cfg.ValidateWithRaw(loader); err != nil {
 		var validationErrs coreconfig.ValidationErrors
 		if errors.As(err, &validationErrs) {
 			for _, e := range validationErrs {
@@ -187,7 +187,8 @@ func main() {
 
 	// Initialize all handler services
 	services := handlerservices.NewServices(
-		k8sClient, runtime.pap, runtime.pdp, planeClientProvider, cfg.SecretManagement, logger, gwClient, webhookProcessor,
+		k8sClient, runtime.pap, runtime.pdp, planeClientProvider, cfg.SecretManagement, logger, gwClient,
+		webhookProcessor, cfg.ResourceTree, cfg.Audit,
 	)
 
 	// Initialize OpenAPI handlers
@@ -215,6 +216,7 @@ func main() {
 		logger.Error("Failed to build audit emitter", slog.Any("error", err))
 		os.Exit(1)
 	}
+	auditMiddlewareConfig := cfg.Audit.MiddlewareConfig()
 
 	// Create base mux for the OpenAPI router.
 	// Non-OpenAPI routes (e.g. /mcp) are registered here before the generated
@@ -229,7 +231,7 @@ func main() {
 		toolsets := buildMCPToolsets(&cfg, services, mcpLogger)
 
 		// MCP middleware chain:
-		//   logger → unauthenticated audit → auth401 interceptor → JWT auth → handler
+		//   logger → auth401 interceptor → JWT auth → handler
 		mcpLoggerMw := apilogger.LoggerMiddleware(mcpLogger)
 		resourceMetadataURL := cfg.Server.PublicURL + "/.well-known/oauth-protected-resource"
 		mcpAuth401Mw := mcpmiddleware.Auth401Interceptor(resourceMetadataURL, cfg.Identity.MCPOAuthScopes)
@@ -241,21 +243,13 @@ func main() {
 		mcpServer, err := mcp.NewHTTPServer(mcpLogger, toolsets, runtime.pdp, mcpaudit.MiddlewareOptions{
 			Emitter:  auditEmitter,
 			Bindings: mcpBindings,
-			Enabled:  cfg.Audit.Enabled,
+			Config:   auditMiddlewareConfig,
 		})
 		if err != nil {
 			logger.Error("Failed to build MCP HTTP server", slog.Any("error", err))
 			os.Exit(1)
 		}
-		// The audit middleware goes outside jwtMiddleware for the same reason
-		// it does in OpenAPIMiddlewares: auth answers a rejected request itself
-		// and never calls next, so mcpaudit's own middleware — which lives
-		// inside the MCP server, below all of this — never sees a 401.
-		// Auth401Interceptor only adds a WWW-Authenticate header; it emits
-		// nothing. OriginMCP so an MCP token rejection isn't recorded as if
-		// it had arrived over REST.
-		unauthedMCPMw := audit.NewUnauthenticatedMiddleware(auditEmitter, audit.OriginMCP, cfg.Audit.Enabled)
-		mcpHandler := middleware.Chain(mcpLoggerMw, unauthedMCPMw, mcpAuth401Mw, jwtMiddleware)(mcpServer)
+		mcpHandler := middleware.Chain(mcpLoggerMw, mcpAuth401Mw, jwtMiddleware)(mcpServer)
 
 		baseMux.Handle("/mcp", mcpHandler)
 	}
@@ -311,7 +305,7 @@ func main() {
 		Logger:         logger,
 		AuthMiddleware: authMiddleware,
 		AuditEmitter:   auditEmitter,
-		AuditEnabled:   cfg.Audit.Enabled,
+		AuditConfig:    auditMiddlewareConfig,
 	})
 	if err != nil {
 		logger.Error("Failed to build OpenAPI middlewares", slog.Any("error", err))
@@ -330,18 +324,16 @@ func main() {
 	// Authorization is enforced inside the handler via AuthzChecker (component:exec).
 	var topHandler http.Handler = handler
 	if cfg.ClusterGateway.Enabled && gatewayURL != "" {
-		execWirelogsAuditMw, err := openapihandlers.NewExecWirelogsAuditMiddleware(logger, auditEmitter, cfg.Audit.Enabled)
+		execWirelogsAuditMw, err := openapihandlers.NewExecWirelogsAuditMiddleware(
+			logger, auditEmitter, auditMiddlewareConfig)
 		if err != nil {
 			logger.Error("Failed to build exec/wirelogs audit middleware", slog.Any("error", err))
 			os.Exit(1)
 		}
-		// Outside jwtMiddleware, mirroring OpenAPIMiddlewares' ordering: auth
-		// short-circuits a rejected request and never calls next, so the
-		// pattern-map-driven middleware inside it never runs on a 401. These
-		// two routes reach the data plane — a live shell and a live traffic
-		// stream — so a rejected attempt on them is exactly the event worth
-		// recording.
-		unauthedExecWirelogsMw := audit.NewUnauthenticatedMiddleware(auditEmitter, audit.OriginAPI, cfg.Audit.Enabled)
+		// Outermost, as in OpenAPIMiddlewares: auth short-circuits a rejected
+		// request before the audit middleware runs, so the access log is the
+		// only record of a rejected attempt on these data-plane routes.
+		execWirelogsLoggerMw := apilogger.LoggerMiddleware(logger.With("component", "exec-wirelogs"))
 
 		execAuthzChecker := svcpkg.NewAuthzChecker(runtime.pdp, logger.With("component", "exec-authz"))
 		gwTLSConf, err := gatewayClient.BuildTLSConfig(&gatewayClient.TLSConfig{
@@ -355,7 +347,7 @@ func main() {
 			os.Exit(1)
 		}
 		execHandler := openapihandlers.NewExecHandler(k8sClient, gwClient, gatewayURL, gwTLSConf, execAuthzChecker, logger)
-		authedExecHandler := unauthedExecWirelogsMw(jwtMiddleware(execWirelogsAuditMw.Handler(execHandler)))
+		authedExecHandler := execWirelogsLoggerMw(jwtMiddleware(execWirelogsAuditMw.Handler(execHandler)))
 
 		// Wirelogs handler shares the same gateway TLS config and authz checker
 		// (authz reuses logs:view at the component scope).
@@ -363,7 +355,7 @@ func main() {
 		wirelogsHandler := openapihandlers.NewWirelogsHandler(
 			k8sClient, gwClient, gatewayURL, gwTLSConf, wirelogsAuthzChecker, logger,
 		)
-		authedWirelogsHandler := unauthedExecWirelogsMw(jwtMiddleware(execWirelogsAuditMw.Handler(wirelogsHandler)))
+		authedWirelogsHandler := execWirelogsLoggerMw(jwtMiddleware(execWirelogsAuditMw.Handler(wirelogsHandler)))
 
 		topMux := http.NewServeMux()
 		topMux.Handle(openapihandlers.ExecRoutePattern, authedExecHandler)

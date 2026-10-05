@@ -20,7 +20,7 @@ import (
 	observeraudit "github.com/openchoreo/openchoreo/internal/observer/audit"
 	"github.com/openchoreo/openchoreo/internal/observer/service"
 	servicemocks "github.com/openchoreo/openchoreo/internal/observer/service/mocks"
-	"github.com/openchoreo/openchoreo/internal/server/middleware"
+	"github.com/openchoreo/openchoreo/internal/observer/types"
 	"github.com/openchoreo/openchoreo/internal/server/middleware/auth"
 )
 
@@ -99,8 +99,8 @@ func updateIncidentRequest() *http.Request {
 	return req
 }
 
-// TestUpdateIncidentAuditEvent drives the one audited operation through the
-// real composed chain. Two assertions carry the weight:
+// TestUpdateIncidentAuditEvent drives the audited mutation through the real
+// composed chain. Two assertions carry the weight:
 //
 //   - actor.id must be the subject's ID, not "anonymous" — proving audit sits
 //     inside auth, since outside it every event would emit as anonymous with
@@ -230,11 +230,10 @@ func TestUpdateIncidentAuditEventOnDenial(t *testing.T) {
 	assert.Equal(t, "comp-c", resource["component"])
 }
 
-// TestAuthRejectionEmitsUnauthenticatedEvent covers a 401 on a protected
-// route being recorded, stamped OriginAPI. Only works with the
-// unauthenticated-audit middleware outside auth — auth never calls next, so
-// the inner audit middleware cannot see the rejection.
-func TestAuthRejectionEmitsUnauthenticatedEvent(t *testing.T) {
+// TestAuthRejectionEmitsNoAuditEvent pins that a 401 on a protected route is
+// left to the access log: auth short-circuits before the audit middleware, so
+// nothing is emitted.
+func TestAuthRejectionEmitsNoAuditEvent(t *testing.T) {
 	t.Parallel()
 
 	rejectAll := func(http.Handler) http.Handler {
@@ -252,74 +251,7 @@ func TestAuthRejectionEmitsUnauthenticatedEvent(t *testing.T) {
 	srv.ServeHTTP(rr, updateIncidentRequest())
 	require.Equal(t, http.StatusUnauthorized, rr.Code)
 
-	events := auditEvents(t, sink)
-	require.Len(t, events, 1,
-		"a 401 must emit exactly one event — two would mean the inner and outer audit "+
-			"middlewares both fired for the same request")
-	event := events[0]
-
-	assert.Equal(t, "api", event["origin"], "a REST rejection must not be stamped as MCP")
-	assert.Equal(t, "unauthenticated", event["result"])
-
-	actor, ok := event["actor"].(map[string]any)
-	require.True(t, ok)
-	assert.Equal(t, "anonymous", actor["id"],
-		"a rejected request has no subject, so the actor is genuinely anonymous here")
-
-	// Emitted with a nil Operation, so such an event is selectable only by
-	// origins/results/actor_types/actors — see the coverage matrix.
-	assert.NotContains(t, event, "operation_id")
-}
-
-// TestMCPMiddlewaresAuditUnauthenticated covers the MCP counterpart of
-// TestAuthRejectionEmitsUnauthenticatedEvent, and the ordering hazard behind
-// it: MCPMiddlewares is Chain-ordered (first
-// outermost) while the generated slices are the reverse. Get it backwards and
-// JWTAuth short-circuits before the audit middleware runs, so an MCP token
-// rejection emits nothing.
-//
-// Driven through middleware.Chain, as routes.Group(...).Handle does in
-// production, rather than restating the slice's contents.
-func TestMCPMiddlewaresAuditUnauthenticated(t *testing.T) {
-	t.Parallel()
-
-	rejectAll := func(http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			w.WriteHeader(http.StatusUnauthorized)
-		})
-	}
-	passThrough := func(next http.Handler) http.Handler { return next }
-
-	emitter, sink := newAuditSink(t)
-	mws, err := MCPMiddlewares(MCPMiddlewareOptions{
-		Auth401:      passThrough,
-		JWTAuth:      rejectAll,
-		AuditEmitter: emitter,
-		AuditEnabled: true,
-	})
-	require.NoError(t, err)
-
-	reached := false
-	handler := middleware.Chain(mws...)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		reached = true
-		w.WriteHeader(http.StatusOK)
-	}))
-
-	rr := httptest.NewRecorder()
-	handler.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(`{}`)))
-
-	require.Equal(t, http.StatusUnauthorized, rr.Code)
-	require.False(t, reached, "auth must short-circuit before the MCP server")
-
-	events := auditEvents(t, sink)
-	require.Len(t, events, 1,
-		"an MCP 401 must emit exactly one event — none means the audit middleware sits inside "+
-			"auth and never runs; two means it is nested with another instance")
-
-	event := events[0]
-	assert.Equal(t, "mcp", event["origin"],
-		"an MCP rejection stamped as api would misattribute it to the REST surface")
-	assert.Equal(t, "unauthenticated", event["result"])
+	assert.Empty(t, auditEvents(t, sink))
 }
 
 // TestMCPMiddlewaresRequireDependencies pins that every dependency is checked
@@ -329,9 +261,8 @@ func TestMCPMiddlewaresRequireDependencies(t *testing.T) {
 
 	passThrough := func(next http.Handler) http.Handler { return next }
 	full := MCPMiddlewareOptions{
-		Auth401:      passThrough,
-		JWTAuth:      passThrough,
-		AuditEmitter: noopAuditEmitter(t),
+		Auth401: passThrough,
+		JWTAuth: passThrough,
 	}
 
 	missingAuth401 := full
@@ -343,11 +274,6 @@ func TestMCPMiddlewaresRequireDependencies(t *testing.T) {
 	missingJWT.JWTAuth = nil
 	_, err = MCPMiddlewares(missingJWT)
 	require.Error(t, err, "a nil JWTAuth must be rejected")
-
-	missingEmitter := full
-	missingEmitter.AuditEmitter = nil
-	_, err = MCPMiddlewares(missingEmitter)
-	require.Error(t, err, "a nil AuditEmitter must be rejected")
 }
 
 // TestInternalSpecHasNoAuditedOperationsToday pins that the internal port's
@@ -393,4 +319,85 @@ func TestHealthEmitsNoAuditEvent(t *testing.T) {
 	require.Equal(t, http.StatusOK, rr.Code)
 
 	assert.Empty(t, auditEvents(t, sink))
+}
+
+func auditLogsQueryRequest() *http.Request {
+	body := strings.NewReader(
+		`{"startTime":"2026-06-05T00:00:00Z","endTime":"2026-06-05T04:00:00Z"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1alpha1/audit-logs/query", body)
+	req.Header.Set("Content-Type", "application/json")
+	return req
+}
+
+// Querying the trail must append to it. category "access" and action
+// "read_audit_log" both come from the auditgen override; a mutation verb here
+// would mean deriveDefinition took over.
+func TestQueryAuditLogsAuditEvent(t *testing.T) {
+	t.Parallel()
+
+	svc := servicemocks.NewMockAuditLogsQuerier(t)
+	svc.On("QueryAuditLogs", mock.Anything, mock.Anything).
+		Return(&types.AuditLogsResponse{
+			Records: []types.AuditLogRecord{},
+		}, nil)
+	h := &Handler{
+		baseHandler:      baseHandler{logger: noopLogger()},
+		auditLogsService: svc,
+	}
+
+	emitter, sink := newAuditSink(t)
+	srv := newPublicServerWithAudit(t, h, authAs("auditor-3"), emitter)
+
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, auditLogsQueryRequest())
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+	events := auditEvents(t, sink)
+	require.Len(t, events, 1, "reading the trail must emit exactly one audit event")
+	event := events[0]
+
+	assert.Equal(t, "QueryAuditLogs", event["operation_id"])
+	assert.Equal(t, "read_audit_log", event["action"])
+	assert.Equal(t, "access", event["category"],
+		"a trail read filed under management would make category useless as the axis "+
+			"separating disclosure from change")
+	assert.Equal(t, "success", event["result"])
+
+	actor, ok := event["actor"].(map[string]any)
+	require.True(t, ok, "event must carry an actor group")
+	assert.Equal(t, "auditor-3", actor["id"])
+}
+
+// The picker read is exempt on volume, so its absence from the trail is
+// intended rather than a wiring gap.
+func TestQueryAuditLogFilterValuesEmitsNoAuditEvent(t *testing.T) {
+	t.Parallel()
+
+	svc := servicemocks.NewMockAuditLogsQuerier(t)
+	svc.On("QueryAuditLogFilterValues", mock.Anything, mock.Anything).
+		Return(&types.AuditLogFilterValuesResponse{
+			Filter: "actor.id", Values: []types.AuditLogFilterValue{},
+		}, nil).Maybe()
+	h := &Handler{
+		baseHandler:      baseHandler{logger: noopLogger()},
+		auditLogsService: svc,
+	}
+
+	emitter, sink := newAuditSink(t)
+	srv := newPublicServerWithAudit(t, h, authAs("auditor-3"), emitter)
+
+	body := strings.NewReader(
+		`{"query":{"startTime":"2026-06-05T00:00:00Z","endTime":"2026-06-05T04:00:00Z"},` +
+			`"filter":"actor.id"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1alpha1/audit-logs/filter-values", body)
+	req.Header.Set("Content-Type", "application/json")
+
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+	assert.Empty(t, auditEvents(t, sink),
+		"the filter values read is exempted in RESTExemptions, on volume rather than sensitivity")
+	assert.Contains(t, observeraudit.RESTExemptions, "QueryAuditLogFilterValues",
+		"the emptiness above is only intentional while the exemption stands")
 }

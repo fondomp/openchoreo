@@ -85,6 +85,14 @@ else
   E2E_CP_EXTRA_VALUES :=
 endif
 
+# Audit records are routed and stored by the observability plane, so the control
+# plane only emits them when that plane is part of the setup.
+ifeq ($(E2E_WITH_OBSERVABILITY),true)
+  E2E_CP_EXTRA_VALUES += --set openchoreoApi.config.audit.enabled=true \
+    --set openchoreoApi.config.audit.observabilityPlaneRef.kind=ClusterObservabilityPlane \
+    --set openchoreoApi.config.audit.observabilityPlaneRef.name=default
+endif
+
 # Namespaces
 E2E_CP_NS              := openchoreo-control-plane
 E2E_DP_NS              := openchoreo-data-plane
@@ -97,14 +105,17 @@ CERT_MANAGER_VERSION   ?= v1.19.4
 ESO_VERSION            ?= 2.0.1
 KGATEWAY_VERSION       ?= v2.3.1
 OPENBAO_CHART_VERSION  ?= 0.25.6
-THUNDER_VERSION        ?= 0.28.0
+THUNDER_VERSION        ?= 1.0.1
 DEX_VERSION            ?= 0.24.1
-OBSERVABILITY_LOGS_OPENSEARCH_VERSION     ?= 0.5.3
-OBSERVABILITY_TRACES_OPENSEARCH_VERSION   ?= 0.6.0
-OBSERVABILITY_METRICS_PROMETHEUS_VERSION  ?= 0.7.0
+
+# Observability community modules: 0.0.0-latest-dev on main, pinned on release
+# branches by hack/pin-observability-modules.sh
+OBSERVABILITY_LOGS_OPENSEARCH_VERSION     ?= 0.0.0-latest-dev
+OBSERVABILITY_TRACES_OPENSEARCH_VERSION   ?= 0.0.0-latest-dev
+OBSERVABILITY_METRICS_PROMETHEUS_VERSION  ?= 0.0.0-latest-dev
 # Tier3 multi-cluster e2e only (see _e2e.mc.install-op / _e2e.mc.install-fluent-bit):
 # logs use the OpenObserve community module there instead of OpenSearch.
-OBSERVABILITY_LOGS_OPENOBSERVE_VERSION    ?= 0.5.1
+OBSERVABILITY_LOGS_OPENOBSERVE_VERSION    ?= 0.0.0-latest-dev
 
 # Helm chart references: local chart dirs or OCI registry
 ifeq ($(E2E_HELM_SOURCE),oci)
@@ -483,11 +494,11 @@ e2e.setup-configure: ## Apply default resources, register planes, and link obser
 
 .PHONY: _e2e.install-thunder
 _e2e.install-thunder:
-	@# Thunder requires a valid /etc/machine-id on the node
+	@# ThunderID requires a valid /etc/machine-id on the node
 	docker exec k3d-$(E2E_CLUSTER_NAME)-server-0 sh -c \
 		"cat /proc/sys/kernel/random/uuid | tr -d '-' > /etc/machine-id"
-	@$(call log_info, Installing Thunder $(THUNDER_VERSION))
-	$(E2E_HELM) upgrade --install thunder oci://ghcr.io/asgardeo/helm-charts/thunder \
+	@$(call log_info, Installing ThunderID $(THUNDER_VERSION))
+	$(E2E_HELM) upgrade --install thunder oci://ghcr.io/thunder-id/helm-charts/thunderid \
 		--namespace thunder --create-namespace \
 		--version $(THUNDER_VERSION) \
 		--values $(PROJECT_DIR)/install/k3d/common/values-thunder.yaml \
@@ -608,6 +619,7 @@ _e2e.install-op:
 		$(E2E_HELM_DEP_UPDATE) \
 		--namespace $(E2E_OP_NS) --create-namespace \
 		--values $(E2E_K3D_DIR)/values-op.yaml \
+		--set observer.audit.enabled=true \
 		--timeout $(E2E_SETUP_TIMEOUT)
 	$(call e2e_patch_gateway,$(E2E_OP_NS))
 	@$(call log_info, Installing observability modules)
@@ -624,6 +636,7 @@ _e2e.install-op:
 		--set openSearchSetup.openSearchSecretName="opensearch-admin-credentials" \
 		--set adapter.openSearchSecretName="opensearch-admin-credentials" \
 		--set fluent-bit.enabled=false \
+		--set auditLogs.enabled=true \
 		--wait --wait-for-jobs --timeout $(E2E_SETUP_TIMEOUT)
 	@$(call log_info, Enabling Fluent Bit after logs module setup)
 	$(E2E_HELM) upgrade --install observability-logs-opensearch \
@@ -633,6 +646,8 @@ _e2e.install-op:
 		--set openSearchSetup.openSearchSecretName="opensearch-admin-credentials" \
 		--set adapter.openSearchSecretName="opensearch-admin-credentials" \
 		--set fluent-bit.enabled=true \
+		--set fluentBitCustomizations.clusterInstance=$(E2E_CLUSTER_NAME) \
+		--set auditLogs.enabled=true \
 		--wait --wait-for-jobs --timeout $(E2E_SETUP_TIMEOUT)
 	$(E2E_HELM) upgrade --install observability-traces-opensearch \
 		oci://ghcr.io/openchoreo/helm-charts/observability-tracing-opensearch \
@@ -919,11 +934,11 @@ e2e.multi.setup-configure: ## Apply default resources, register planes, link obs
 
 .PHONY: _e2e.mc.install-thunder
 _e2e.mc.install-thunder:
-	@# Thunder requires a valid /etc/machine-id on the node
+	@# ThunderID requires a valid /etc/machine-id on the node
 	docker exec k3d-$(E2E_MC_CP_CLUSTER_NAME)-server-0 sh -c \
 		"cat /proc/sys/kernel/random/uuid | tr -d '-' > /etc/machine-id"
-	@$(call log_info, Installing Thunder $(THUNDER_VERSION))
-	$(E2E_MC_CP_HELM) upgrade --install thunder oci://ghcr.io/asgardeo/helm-charts/thunder \
+	@$(call log_info, Installing ThunderID $(THUNDER_VERSION))
+	$(E2E_MC_CP_HELM) upgrade --install thunder oci://ghcr.io/thunder-id/helm-charts/thunderid \
 		--namespace thunder --create-namespace \
 		--version $(THUNDER_VERSION) \
 		--values $(PROJECT_DIR)/install/k3d/common/values-thunder.yaml \
@@ -1072,8 +1087,9 @@ _e2e.mc.install-op:
 		--namespace $(E2E_OP_NS) \
 		--values $(E2E_MC_K3D_DIR)/values-op-modules.yaml \
 		--set common.openObserveStream=container-logs \
-		--set-json 'openobserve-standalone.httpRouteHostnames=["host.k3d.internal"]' \
+		--set-json 'common.httpRouteHostnames=["host.k3d.internal"]' \
 		--set fluent-bit.enabled=true \
+		--set fluentBitCustomizations.clusterInstance=$(E2E_MC_OP_CLUSTER_NAME) \
 		--wait --wait-for-jobs --timeout $(E2E_SETUP_TIMEOUT)
 	@# OpenObserve stores the stream as "container_logs" (hyphen -> underscore),
 	@# so the adapter must query that name even though ingest/HTTPRoute use the
@@ -1129,7 +1145,7 @@ _e2e.mc.install-fluent-bit:
 	@$(E2E_MC_WP_KUBECTL) create secret generic openobserve-admin-credentials \
 		-n $(E2E_OP_NS) \
 		--from-literal=ZO_ROOT_USER_EMAIL="admin@openchoreo.localhost" \
-		--from-literal=ZO_ROOT_USER_PASSWORD="ThisIsTheOpenObservePassword1" \
+		--from-literal=ZO_ROOT_USER_PASSWORD="ThisIsTheOpenObservePassword1!" \
 		--dry-run=client -o yaml | $(E2E_MC_WP_KUBECTL) apply -f -
 	@# Fluent Bit routes logs through the OP cluster's shared kgateway HTTP listener
 	@# (port 31080 → 11080), matched by the logs module's own HTTPRoute for the
@@ -1144,10 +1160,11 @@ _e2e.mc.install-fluent-bit:
 		--set openObserveSetup.enabled=false \
 		--set adapter.enabled=false \
 		--set fluent-bit.enabled=true \
+		--set fluentBitCustomizations.clusterInstance=$(E2E_MC_DP_CLUSTER_NAME) \
 		--set common.openObserveStream=container-logs \
-		--set fluent-bit.openObserveHost=host.k3d.internal \
-		--set fluent-bit.openObservePort=31080 \
-		--set fluent-bit.openObserveTls=Off \
+		--set common.openObserveHost=host.k3d.internal \
+		--set common.openObservePort=31080 \
+		--set common.openObserveTlsEnabled=false \
 		--wait --timeout $(E2E_SETUP_TIMEOUT)
 	@$(call log_info, Installing Fluent Bit in WP cluster)
 	$(E2E_MC_WP_HELM) upgrade --install observability-logs-openobserve \
@@ -1158,10 +1175,11 @@ _e2e.mc.install-fluent-bit:
 		--set openObserveSetup.enabled=false \
 		--set adapter.enabled=false \
 		--set fluent-bit.enabled=true \
+		--set fluentBitCustomizations.clusterInstance=$(E2E_MC_WP_CLUSTER_NAME) \
 		--set common.openObserveStream=container-logs \
-		--set fluent-bit.openObserveHost=host.k3d.internal \
-		--set fluent-bit.openObservePort=31080 \
-		--set fluent-bit.openObserveTls=Off \
+		--set common.openObserveHost=host.k3d.internal \
+		--set common.openObservePort=31080 \
+		--set common.openObserveTlsEnabled=false \
 		--wait --timeout $(E2E_SETUP_TIMEOUT)
 	@# Install metrics exporter in DP and WP clusters — per observability-metrics-prometheus README.
 	@# Deploys PrometheusAgent to scrape local metrics and forward to OP cluster's receiver
